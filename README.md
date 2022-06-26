@@ -25,6 +25,6 @@ For more information contact angganurprasetya4@gmail.com
 
 [Listen Notes](https://listennotes.com)
 
-### Flagly Final UI
+### Ipod Final UI
 ![Landing UI](https://github.com/prasetyanurangga/ipod/raw/main/ipod.png)
 
