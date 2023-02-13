@@ -1,5 +1,12 @@
-import 'package:flutter/material.dart';
+import 'dart:convert';
+
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:convert/convert.dart';
+import 'package:crypto/crypto.dart';
+import 'package:dio/dio.dart';
+import 'package:flutter/material.dart';
+import 'package:ipods/models/PodcastModel.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:volume_controller/volume_controller.dart';
 
 void main() {
@@ -13,21 +20,23 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'Ipod',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // Try running your application with "flutter run". You'll see the
-        // application has a blue toolbar. Then, without quitting the app, try
-        // changing the primarySwatch below to Colors.green and then invoke
-        // "hot reload" (press "r" in the console where you ran "flutter run",
-        // or simply save your changes to "hot reload" in a Flutter IDE).
-        // Notice that the counter didn't reset back to zero; the application
-        // is not restarted.
         primarySwatch: Colors.blue,
       ),
-      home: const HomePage(title: 'Flutter Demo Home Page'),
+      home: const HomePage(title: 'Ipod'),
     );
+  }
+}
+
+class PodCastIndex {
+  final String content;
+
+  PodCastIndex({required this.content});
+
+  factory PodCastIndex.fromJson(Map<String, dynamic> json) {
+    debugPrint(json.toString());
+    return PodCastIndex(content: json.toString());
   }
 }
 
@@ -40,21 +49,20 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin {
-  int _counter = 0;
+class _HomePageState extends State<HomePage>
+    with SingleTickerProviderStateMixin {
+  final int _counter = 0;
   double radius = 150;
   double degree = 0;
   double rotationalChange = 0;
   double lastOffset = 0;
   bool isPlay = false;
-
   bool smaller = false;
-
+  List<Episodes> bunchOfEpisode = [];
   PageController controller = PageController(viewportFraction: 1);
-
+  late AudioPlayer audioPlayer;
 
   void _panHandler(DragUpdateDetails d) {
-
     bool panUp = d.delta.dy <= 0.0;
     bool panLeft = d.delta.dx <= 0.0;
     bool panRight = !panLeft;
@@ -75,102 +83,247 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         ? yChange
         : yChange * -1;
 
-    double horz = (onTop && panLeft) || (onBottom && panRight) 
-        ? xChange 
-        : xChange * -1;
+    double horz =
+        (onTop && panLeft) || (onBottom && panRight) ? xChange : xChange * -1;
 
     // Total computed change with velocity
     double scrollOffsetChange = (horz + vert) * (d.delta.distance * 0.4);
-    print(scrollOffsetChange);
-    // Move the page view scroller 
+
+    // Move the page view scroller
     controller.jumpTo(controller.offset + scrollOffsetChange);
     setState(() {
       degree = controller.offset + scrollOffsetChange;
     });
   }
 
-  void _panEndHandler(DragEndDetails d) {
-  }
-
+  void _panEndHandler(DragEndDetails d) {}
 
   late AnimationController _animationController;
 
   double _volumeListenerValue = 0;
 
+  double currentProgress = 0.0;
+  int maxProgress = 365;
+  Duration endDuration = const Duration(seconds: 0);
+  Duration startDuration = const Duration(seconds: 0);
+  bool isPlaying = false;
+  bool isLoading = true;
+  int currentIndex = 0;
+
   @override
   void initState() {
     super.initState();
+    audioPlayer = AudioPlayer();
+    fetchDataPodcast();
     controller.addListener(() {
-      setState((){
+      setState(() {
         lastOffset = controller.page ?? 0.0;
       });
-      // print(controller.page);
     });
 
-    _animationController =
-      AnimationController(vsync: this, duration: Duration(milliseconds: 450));
-     VolumeController().listener((volume) {
+    _animationController = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 450));
+    audioPlayer.positionStream.listen((position) {
+      final positionNotNull = position;
+      setState(() {
+        currentProgress = positionNotNull.inSeconds / maxProgress;
+        startDuration = positionNotNull;
+      });
+    });
+
+    audioPlayer.playerStateStream.listen((playState) {
+      if (playState.processingState == ProcessingState.ready) {
+        print("ready");
+      }
+      if (playState.processingState == ProcessingState.completed) {
+        _animationController.reverse();
+        pauseAudio();
+        setState(() {
+          endDuration = const Duration(seconds: 0);
+          startDuration = const Duration(seconds: 0);
+          currentProgress = 0.0;
+          isPlaying = false;
+        });
+      }
+    });
+
+    VolumeController().listener((volume) {
       setState(() => _volumeListenerValue = volume);
     });
 
-    VolumeController().getVolume().then((volume) => _volumeListenerValue  = volume);
+    VolumeController()
+        .getVolume()
+        .then((volume) => _volumeListenerValue = volume);
   }
-  
+
+  playAudio() async {
+    audioPlayer.play();
+  }
+
+  pauseAudio() async {
+    await audioPlayer.pause();
+  }
+
+  void handleOnPressedIcon() {
+    setState(() {
+      isPlaying = !isPlaying;
+      if (isPlaying) {
+        _animationController.forward();
+        playAudio();
+      } else {
+        _animationController.reverse();
+        pauseAudio();
+      }
+    });
+  }
+
+  Future<void> fetchDataPodcast() async {
+    var unixTime = (DateTime.now().millisecondsSinceEpoch / 1000).round();
+    String newUnixTime = unixTime.toString();
+    var apiKey = "WRHFHWPXFFWSPPR3SRJX";
+    var apiSecret = "VMAnxKt7KmW4H3Htxwu5F8LPbP4bLxm8QLgp8Szd";
+    var firstChunk = utf8.encode(apiKey);
+    var secondChunk = utf8.encode(apiSecret);
+    var thirdChunk = utf8.encode(newUnixTime);
+
+    var output = AccumulatorSink<Digest>();
+    var input = sha1.startChunkedConversion(output);
+    input.add(firstChunk);
+    input.add(secondChunk);
+    input.add(thirdChunk);
+    input.close();
+    var digest = output.events.single;
+
+    Dio dio = Dio();
+    dio.options.headers['X-Auth-Date'] = newUnixTime;
+    dio.options.headers['X-Auth-Key'] = apiKey;
+    dio.options.headers['Authorization'] = digest.toString();
+    dio.options.headers['User-Agent'] = "SomethingAwesome/1.0.1";
+    final response = await dio.get(
+        "https://api.podcastindex.org/api/1.0/episodes/random?max=10&lang=id");
+    if (response.statusCode == 200) {
+      // If the server did return a 200 OK response,
+      // then parse the JSON.
+      final result = PodcastModel.fromJson(response.data);
+
+      setState(() {
+        bunchOfEpisode = result.episodes ?? [];
+        List<AudioSource> bunchOfUrl = bunchOfEpisode
+            .map((e) => AudioSource.uri(Uri.parse(e.enclosureUrl ?? "")))
+            .toList();
+        final playlist = ConcatenatingAudioSource(
+          // Start loading next item just before reaching it
+          useLazyPreparation: true,
+          // Customise the shuffle algorithm
+          shuffleOrder: DefaultShuffleOrder(),
+          // Specify the playlist items
+          children: bunchOfUrl,
+        );
+        audioPlayer.setAudioSource(playlist,
+            initialIndex: 0, initialPosition: Duration.zero);
+      });
+    } else {
+      // If the server did not return a 200 OK response,
+      // then throw an exception.
+      throw Exception('Failed to load album');
+    }
+  }
+
+  void _onPageChanged(int index) {
+    _animationController.reverse();
+    pauseAudio();
+    setState(() {
+      endDuration = const Duration(seconds: 0);
+      startDuration = const Duration(seconds: 0);
+
+      currentProgress = 0.0;
+      isPlaying = false;
+      currentIndex = index;
+    });
+
+    audioPlayer.seek(Duration.zero, index: index);
+  }
+
+  String currentTitle() {
+    if (bunchOfEpisode.asMap().containsKey(currentIndex)) {
+      if (bunchOfEpisode[currentIndex].title != null &&
+          (bunchOfEpisode[currentIndex].title ?? "").length > 40) {
+        return bunchOfEpisode[currentIndex].title!.substring(0, 40) + "...";
+      } else {
+        return bunchOfEpisode[currentIndex].title ?? "";
+      }
+    }
+
+    return "";
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Color(0xFF626262),
+      backgroundColor: const Color(0xFF626262),
       body: SafeArea(
         child: Center(
           child: Container(
-            padding: EdgeInsets.all(16),
+            padding: const EdgeInsets.all(16),
             child: Column(
               children: [
-                Container(
+                const SizedBox(height: 16),
+                SizedBox(
                   height: 300,
                   child: PageView(
                     pageSnapping: true,
                     scrollDirection: Axis.horizontal,
                     controller: controller,
-                    children: List.generate(20, (index){
-                      double relativePosition = index - lastOffset;
-                      return Container(
-                        padding: EdgeInsets.symmetric(horizontal: 8),
-                        width: 300,
-                        child: Transform(
-        transform: Matrix4.identity() // add perspective
-          ..scale((1 - relativePosition.abs()).clamp(0.4, 0.6) + 0.4),
-        alignment: relativePosition >= 0
-            ? Alignment.centerLeft
-            : Alignment.centerRight,
-                          child: Container(
-                            child: CachedNetworkImage(
-                              progressIndicatorBuilder: (context, url, progress) => Center(
-                                child: CircularProgressIndicator(
-                                  value: progress.progress,
+                    onPageChanged: _onPageChanged,
+                    children: List.generate(
+                      bunchOfEpisode.length,
+                      (index) {
+                        double relativePosition = index - lastOffset;
+                        return Container(
+                          child: Transform(
+                            transform: Matrix4.identity() // add perspective
+                              ..scale(
+                                  (1 - relativePosition.abs()).clamp(0.4, 0.6) +
+                                      0.4),
+                            alignment: relativePosition >= 0
+                                ? Alignment.centerLeft
+                                : Alignment.centerRight,
+                            child: Container(
+                              child: CachedNetworkImage(
+                                progressIndicatorBuilder:
+                                    (context, url, progress) => Center(
+                                  child: CircularProgressIndicator(
+                                    value: progress.progress,
+                                  ),
                                 ),
+                                imageBuilder: (context, imageProvider) =>
+                                    Container(
+                                  decoration: BoxDecoration(
+                                    image: DecorationImage(
+                                        image: imageProvider,
+                                        fit: BoxFit.cover),
+                                  ),
+                                ),
+                                imageUrl: bunchOfEpisode[index].feedImage!,
                               ),
-                              imageBuilder: (context, imageProvider) => Container(
-    decoration: BoxDecoration(
-      image: DecorationImage(
-          image: imageProvider,
-          fit: BoxFit.cover
-        ),
-    ),
-  ),
-                              imageUrl: "https://cdn-images-1.listennotes.com/podcasts/weird-science-marvel-comics-marvel-comics-pWd9e1Tm7GD-4HOWs-mUV1K.300x300.jpg",
                             ),
-                          )
-                        )
-                      );
-                    }),
-                    onPageChanged: (int page){
-                      print(page);
-                    }
-                  )
+                          ),
+                        );
+                      },
+                    ),
+                  ),
                 ),
-                SizedBox(height: 32),
+                LinearProgressIndicator(
+                  backgroundColor: Colors.grey[300]?.withOpacity(0.3),
+                  valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+                  value: currentProgress,
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  currentTitle(),
+                  style: const TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.w600),
+                ),
                 Expanded(
                   child: Center(
                     child: Stack(
@@ -180,99 +333,107 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                           onPanUpdate: _panHandler,
                           onPanEnd: _panEndHandler,
                           child: Container(
-                              height: radius * 2,
-                              width: radius * 2,
-                              decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  color: Color(0xFF171717),
-                              ),
-                              child: Stack(children: [
+                            height: radius * 2,
+                            width: radius * 2,
+                            decoration: const BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Color(0xFF171717),
+                            ),
+                            child: Stack(
+                              children: [
                                 Container(
                                   child: IconButton(
-                                    icon: Icon(Icons.add),
+                                    icon: const Icon(Icons.add),
                                     iconSize: 40,
                                     color: Colors.white,
                                     onPressed: () {
-                                      double volumeNow = _volumeListenerValue + 0.1;
-                                      VolumeController().setVolume(volumeNow > 1 ? 1 : volumeNow);
+                                      double volumeNow =
+                                          _volumeListenerValue + 0.1;
+                                      VolumeController().setVolume(
+                                          volumeNow > 1 ? 1 : volumeNow);
                                     },
                                   ),
                                   alignment: Alignment.topCenter,
-                                  margin: EdgeInsets.only(top: 30),
+                                  margin: const EdgeInsets.only(top: 30),
                                 ),
                                 Container(
                                   child: IconButton(
-                                    icon: Icon(Icons.fast_forward),
+                                    icon: const Icon(Icons.fast_forward),
                                     iconSize: 40,
                                     color: Colors.white,
                                     onPressed: () {
-                                      controller.nextPage(duration: Duration(milliseconds: 500), curve: Curves.easeInOut);
+                                      controller.nextPage(
+                                          duration:
+                                              const Duration(milliseconds: 500),
+                                          curve: Curves.easeInOut);
                                       // controller.jumpTo(controller.offset + 250);
                                     },
                                   ),
                                   alignment: Alignment.centerRight,
-                                  margin: EdgeInsets.only(right: 30),
+                                  margin: const EdgeInsets.only(right: 30),
                                 ),
                                 Container(
                                   child: IconButton(
-                                    icon: Icon(Icons.fast_rewind),
+                                    icon: const Icon(Icons.fast_rewind),
                                     iconSize: 40,
                                     color: Colors.white,
                                     onPressed: () {
-                                      controller.previousPage(duration: Duration(milliseconds: 500), curve: Curves.easeInOut);
+                                      controller.previousPage(
+                                          duration:
+                                              const Duration(milliseconds: 500),
+                                          curve: Curves.easeInOut);
                                     },
                                   ),
                                   alignment: Alignment.centerLeft,
-                                  margin: EdgeInsets.only(left: 30),
+                                  margin: const EdgeInsets.only(left: 30),
                                 ),
                                 Container(
                                   child: IconButton(
-                                    icon: Icon(Icons.remove),
+                                    icon: const Icon(Icons.remove),
                                     iconSize: 40,
                                     color: Colors.white,
                                     onPressed: () {
-                                      double volumeNow = _volumeListenerValue - 0.1;
-                                      VolumeController().setVolume(volumeNow < 0 ? 0 : volumeNow);
+                                      double volumeNow =
+                                          _volumeListenerValue - 0.1;
+                                      VolumeController().setVolume(
+                                          volumeNow < 0 ? 0 : volumeNow);
                                     },
                                   ),
                                   alignment: Alignment.bottomCenter,
-                                  margin: EdgeInsets.only(bottom: 30),
+                                  margin: const EdgeInsets.only(bottom: 30),
                                 )
-                              ]),
-                          )
+                              ],
+                            ),
+                          ),
                         ),
                         Container(
                           height: 100,
                           width: 100,
-                          decoration: BoxDecoration(
+                          decoration: const BoxDecoration(
                             shape: BoxShape.circle,
                             color: Color(0xFF626262),
                           ),
                           child: IconButton(
                             icon: AnimatedIcon(
                               icon: AnimatedIcons.play_pause,
-                                    color: Colors.white,
+                              color: Colors.white,
                               progress: _animationController,
                             ),
                             iconSize: 40,
-                            onPressed: (){
-                              isPlay = !isPlay;
-                              isPlay
-                                  ? _animationController.forward()
-                                  : _animationController.reverse();
-
+                            onPressed: () {
+                              handleOnPressedIcon();
                             },
                           ),
                         ),
-                      ]
-                    )
-                  )
-                )
-              ]
-            )
-          )
-        )
-      ) // This trailing comma makes auto-formatting nicer for build methods.
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ), // This trailing comma makes auto-formatting nicer for build methods.
     );
   }
 }
